@@ -2505,7 +2505,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             // for TEX); Maxwell TLD4 takes it as AOFFI (bits 54-55) from Rb.
             const bool offsets = insn.Bits(76, 1) != 0;
             // Bits 76-77 = 2: per-tap offsets (PTP), x and y in Ra, Ra+1 and the packed offsets in
-            // Rb, Rb+1. The host gather needs them as constants, so they must be proven immediates.
+            // Rb, Rb+1.
             const bool per_tap = insn.Bits(76, 2) == 2;
             const bool half = insn.Bits(79, 1) != 0;
             // Bit 78: depth compare (TLD4.DC). The reference follows the coordinates (and the
@@ -2601,20 +2601,19 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                             packed_offsets[i] = definition.words[1];
                         }
                     }
-                    if (!packed_offsets[0] || !packed_offsets[1]) return std::nullopt;
-                    return std::array<u32, 2>{*packed_offsets[0], *packed_offsets[1]};
-                };
-                if (const auto packed_offsets = prove_offsets()) {
-                    for (const u32 packed : *packed_offsets) {
+                    for (const auto& packed : packed_offsets) {
+                        if (!packed) return std::nullopt;
                         // Each byte is a signed 6-bit offset; the gather reads only the low six bits.
                         for (u32 shift = 0; shift < 32; shift += 8) {
-                            const u32 value = (packed >> shift) & 255;
+                            const u32 value = (*packed >> shift) & 255;
                             if (value > 31 && value < 224)
-                                return fail(index, "native per-tap gather offset range");
+                                return std::nullopt;
                         }
                     }
-                    for (u32 i = 0; i < packed_offsets->size(); ++i)
-                        mov_imm(248 + i, (*packed_offsets)[i]);
+                    return std::array<u32, 2>{*packed_offsets[0], *packed_offsets[1]};
+                };
+                if (const auto packed = prove_offsets()) {
+                    for (u32 i = 0; i < 2; ++i) mov_imm(248 + i, (*packed)[i]);
                 } else {
                     for (u32 i = 0; i < 2; ++i)
                         emit(0x5c98000000000000ULL | predicate | (248 + i) | (u64{15} << 39) |
