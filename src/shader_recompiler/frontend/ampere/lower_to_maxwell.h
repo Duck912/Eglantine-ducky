@@ -1129,15 +1129,15 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         case 0xab9: case 0xabb: { // ULDC, direct or indexed.
             const u32 uniform_dest = insn.Bits(16, 8), index_reg = insn.Bits(24, 8);
             const u32 width = insn.Bits(73, 3);
-            const bool subword_load = opcode == 0xab9 && (width == 0 || width == 2);
+            const bool subword_load = width == 0 || width == 2;
             const u32 offset = insn.Bits(38, 16);
             const u32 alignment = width == 0 ? 1U : width == 2 ? 2U : 4U;
             const u32 target = uniform_register(uniform_dest);
             const u32 index_target = opcode == 0xabb ? uniform_register(index_reg) : 255U;
             if (target == ~0U || target == 255 || (!subword_load && width != 4 && width != 5) ||
-                (subword_load && offset >= 0x8000) ||
+                (subword_load && opcode == 0xab9 && offset >= 0x8000) ||
                 (width == 5 && ((uniform_dest & 1) || uniform_register(uniform_dest + 1) != target + 1)) ||
-                bank() >= 18 || offset % alignment || insn.Bits(62, 2) ||
+                bank() >= 18 || (opcode == 0xab9 && offset % alignment) || insn.Bits(62, 2) ||
                 (insn.words[2] & ~0xe00U) != (opcode == 0xab9 ? 0U : 0x08000000U) ||
                 index_target == ~0U)
                 return fail(index, "native uniform constant load mode");
@@ -1581,23 +1581,23 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                  (u64{operation} << 29) | (u64{dimension} << 33) | (u64{offset} << 36));
             break;
         }
-        case 0x59f: { // SURED.D.<op>.STRONG.GPU.IGN U32, direct descriptor, buffer or 2D.
+        case 0x59f: { // SURED.D.STRONG.GPU.IGN U32, direct descriptor, buffer or 2D.
             const u32 binding = insn.Bits(54, 5), offset = insn.Bits(40, 14);
             const u32 data = insn.Bits(32, 8), coordinate = insn.Bits(24, 8);
             const u32 dimension = insn.Bits(61, 3);
-            // Reduction op at 87-89, numbered like Maxwell's (ADD, MIN, MAX, INC, DEC, AND, OR, XOR).
-            const u32 operation = insn.Bits(87, 3);
-            if ((insn.words[2] & ~0x03800000U) != 0x0010e000 || (dimension != 1 && dimension != 3) ||
-                binding >= 18 || offset > 0x1fff || insn.Bits(59, 2) || coordinate > 253)
+            // The operation (bits 87-90) is ordered as SUATOM's and Maxwell's: ADD, MIN, MAX,
+            // INC, DEC, AND, OR, XOR.
+            const u32 operation = insn.Bits(87, 4);
+            if ((insn.words[2] & ~0x07800000U) != 0x0010e000 || operation > 7 || (dimension != 1 && dimension != 3) || binding >= 18 ||
+                offset > 0x1fff || insn.Bits(59, 2) || coordinate > 253)
                 return fail(index, "native surface reduction mode");
             if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
                 return fail(index, "native surface descriptor buffer conflict");
             result.required_texture_buffer = binding;
-            // Maxwell SURED (as the frontend decodes it): operand 0-7, coordinates 8-15, op 24,
-            // U32 is zero at 20, type 33 (1 = buffer, 3 = 2D), bound offset 36, bound 51.
-            emit(0xeb40000000000000ULL | predicate | data | (u64{coordinate} << 8) |
-                (u64{operation} << 24) | (u64{dimension} << 33) | (u64{offset} << 36) |
-                (u64{1} << 51));
+            // Maxwell SURED (as the frontend decodes it): operand 0-7, coordinates 8-15, operation
+            // 24, U32 is zero at 20, type 33 (1 = buffer, 3 = 2D), bound offset 36, bound 51.
+            emit(0xeb40000000000000ULL | predicate | data | (u64{coordinate} << 8) | (u64{operation} << 24) |
+                (u64{dimension} << 33) | (u64{offset} << 36) | (u64{1} << 51));
             break;
         }
         case 0x301: // BREV register.
@@ -2104,11 +2104,45 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                  (u64{insn.Bits(32, 8)} << 20) | (u64{insn.Bits(78, 2)} << 39));
             break;
         }
-
         case 0x243:
-            if (insn.Bits(24, 8) != 255 || (insn.words[1] & ~0xffU) ||
-                insn.words[2] != 0x0000c4ffU)
+            // F2IP.U8.F32 Rd, Ra, Rb, Rc: Rb to byte 0, Ra to byte 1, Rc's high half above.
+            if ((insn.words[1] & ~0xffU) || (insn.words[2] & ~0xc0ffU) != 0x400U)
                 return fail(index, "native packed float-to-byte mode");
+            if (insn.Bits(24, 8) != 255 || insn.Bits(64, 8) != 255 || insn.Bits(78, 2) != 3) {
+                const u32 rounding = insn.Bits(78, 2);
+                // Clamp a float (NaN to 0) to [0, 255] in R250 and convert it in place.
+                const auto convert_byte = [&](u32 source) {
+                    emit(0x5800000000000000ULL | predicate | 250 | (u64{source} << 8) |
+                         (u64{source} << 20) | (u64{7} << 39) | (u64{7} << 48));
+                    emit(0x5c40000000000000ULL | predicate | 250 | (u64{source} << 8) |
+                         (u64{250} << 20) | (u64{7} << 48));
+                    mov_imm(252, 0);
+                    emit(0x5c60000000000000ULL | predicate | 250 | (u64{250} << 8) |
+                         (u64{252} << 20) | (u64{15} << 39));
+                    mov_imm(252, 0x437f0000U);
+                    emit(0x5c60000000000000ULL | predicate | 250 | (u64{250} << 8) |
+                         (u64{252} << 20) | (u64{7} << 39));
+                    emit(0x5cb0000000000000ULL | predicate | 250 | (u64{2} << 8) | (u64{2} << 10) |
+                         (u64{250} << 20) | (u64{rounding} << 39));
+                };
+                convert_byte(insn.Bits(32, 8));
+                emit(0x5c98000000000000ULL | predicate | 251 | (u64{15} << 39) | (u64{250} << 20));
+                if (insn.Bits(24, 8) != 255) {
+                    convert_byte(insn.Bits(24, 8));
+                    emit(0x3848000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{8} << 20));
+                    emit(0x5c40000000000000ULL | predicate | 251 | (u64{251} << 8) |
+                         (u64{250} << 20) | (u64{1} << 41) | (u64{7} << 48));
+                }
+                if (insn.Bits(64, 8) != 255) {
+                    mov_imm(252, 0xffff0000U);
+                    emit(0x5c40000000000000ULL | predicate | 250 | (u64{insn.Bits(64, 8)} << 8) |
+                         (u64{252} << 20) | (u64{7} << 48));
+                    emit(0x5c40000000000000ULL | predicate | 251 | (u64{251} << 8) |
+                         (u64{250} << 20) | (u64{1} << 41) | (u64{7} << 48));
+                }
+                emit(base(0x5c98000000000000ULL) | (u64{15} << 39) | (u64{251} << 20));
+                break;
+            }
             insn.words[0] &= 0x00ffffffU;
             insn.words[2] = 0x0021e000U;
             opcode = 0x305;
@@ -3191,7 +3225,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             }
             // I2F.{U,S}8 Rd, Rs.B0-B3: the byte selector (bits 60-61) as Maxwell's (41-42).
             if ((insn.words[2] & ~0x400U) != (opcode == 0xd06 ? 0x08001000U : 0x1000U) ||
-                (insn.words[1] & (opcode == 0xd06 ? 0xffffff00U : 0xcfffff00U)) || source == ~0U)
+                (insn.words[1] & 0xcfffff00U) || source == ~0U)
                 return fail(index, "native byte-to-float conversion mode");
             emit(base(0x5cb8000000000000ULL) | (u64{2} << 8) | (is_signed << 13) | (u64{source} << 20) |
                  (u64{insn.Bits(60, 2)} << 41));
@@ -3394,13 +3428,12 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             if (insn.Bits(80, 1)) {
                 // LEA.HI Rd, Ra, Rb (or an immediate, 0x811), Rc, s: Rb + high word of (Rc:Ra << s);
                 // bit 73 sign-extends Ra (Rc is RZ) and .X (bit 74) adds the carry predicate in bits 87-90.
-                // 0x211 bit 63 negates Rb, as in the low form below.
+                // Bit 63 negates Rb, as in the low form.
                 const bool extended = insn.Bits(74, 1) != 0;
-                const bool negate_b = opcode == 0x211 && insn.Bits(63, 1);
                 const u32 high = insn.Bits(64, 8);
+                const bool negate_b = (opcode == 0x211 || opcode == 0xa11) && insn.Bits(63, 1);
                 if (insn.Bits(72, 1) || insn.Bits(81, 3) != 7 || (negate_b && extended) ||
-                    (high != 255 && insn.Bits(73, 1)) || (opcode == 0x211 && insn.Bits(62, 1)) ||
-                    (opcode == 0xa11 && insn.Bits(62, 2)) ||
+                    (high != 255 && insn.Bits(73, 1)) || ((opcode == 0x211 || opcode == 0xa11) && insn.Bits(62, 1)) ||
                     (opcode == 0xc11 && (insn.words[1] & ~0x3fU)))
                     return fail(index, "native high effective address mode");
                 u32 b = opcode == 0xc11 ? uniform_register(insn.Bits(32, 8)) : insn.Bits(32, 8);
@@ -3422,9 +3455,21 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 } else {
                     high_word(predicate | 250);
                     if (extended) {
+                        // A uniform carry-in UPn is swapped in from R239 bit 6-n.
+                        const u32 condition = insn.Bits(87, 3);
+                        const bool uniform_carry = rewritten_uniform && condition != 7;
+                        const u32 source = uniform_carry ? 6 - condition : condition;
+                        const u32 mask = 1U << source;
                         mov_imm(252, 1);
+                        if (uniform_carry) {
+                            emit(0x38e8000000070000ULL | 253 | (u64{255} << 8) | (u64{mask} << 20));
+                            emit(0x38f0000000070000ULL | (u64{239} << 8) | (u64{mask} << 20));
+                        }
                         emit(0x5ca0000000000000ULL | predicate | 252 | (u64{252} << 8) | (u64{255} << 20) |
-                             (u64{insn.Bits(87, 3)} << 39) | (u64{insn.Bits(90, 1)} << 42));
+                             (u64{source} << 39) | (u64{insn.Bits(90, 1)} << 42));
+                        if (uniform_carry) {
+                            emit(0x38f0000000070000ULL | (u64{253} << 8) | (u64{mask} << 20));
+                        }
                         emit(0x5c10000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{252} << 20));
                     }
                     emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{b} << 20) |
@@ -3436,7 +3481,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             const u32 carry_out = insn.Bits(81, 3);
             if (insn.Bits(72, 1) || insn.Bits(74, 1) || insn.Bits(80, 1) ||
                 (carry_out != 7 && ((opcode != 0x811 && insn.Bits(63, 1)) ||
-                                    (rewritten_uniform && (opcode != 0x211 || carry_out > 1)))) ||
+                                    (rewritten_uniform && opcode != 0x211))) ||
                 ((opcode == 0x211 || opcode == 0xa11) && insn.Bits(62, 1)) || (opcode == 0xc11 && (insn.words[1] & ~0x8000003fU)))
                 return fail(index, "native LEA carry/high mode");
             // 0x211 bit 63 negates Rb (LEA Rd, Ra, -Rb, s), as Maxwell ISCADD's bit 48.
@@ -3540,9 +3585,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 const bool carry_in = insn.Bits(74, 1) != 0;
                 const u32 carry_out = insn.Bits(81, 3);
                 const u32 a = insn.Bits(24, 8);
-                if ((carry_in && carry_out != 7) || (opcode == 0x210 && (insn.words[1] & ~0xffU)) ||
-                    (rewritten_uniform && carry_out != 7 && carry_out > 1) ||
-                    (rewritten_uniform && carry_in && insn.Bits(87, 3) > 1 && insn.Bits(87, 3) != 7))
+                if ((carry_in && carry_out != 7) || (opcode == 0x210 && (insn.words[1] & ~0xffU)))
                     return fail(index, "native integer carry mode");
                 if (opcode == 0x810) {
                     emit(0x1c00000000000000ULL | predicate | 250 | (u64{a} << 8) | (u64{insn.words[1]} << 20));
