@@ -2237,22 +2237,26 @@ private:
         TipcReplyWords(ctx, {60, 0});
     }
 
-    // nn::vi2::QueryDisplayHdrPaperWhite(display name): u16 paper white in nits. The empty reply
-    // left it to the message buffer's leftovers; answer the BT.2408 reference white.
+    // nn::vi2::QueryDisplayHdrPaperWhite(display name): u16 reference white in nits.
     void QueryDisplayHdrPaperWhite(HLERequestContext& ctx) {
-        TipcReplyWords(ctx, {203});
+        if (Settings::values.hdr_reference_white.GetValue() > 0) {
+            TipcReplyWords(ctx, {Settings::values.hdr_reference_white.GetValue()});
+        } else {
+            // Switch 2 calibration starts at ceil(peak / 1.5), clamped to 50..300 nits.
+            TipcReplyWords(ctx, {std::clamp<u32>(
+                                    (Settings::values.hdr_peak_luminance.GetValue() * 2U + 2U) / 3U,
+                                    50U, 300U)});
+        }
     }
 
-    // nn::vi2::QueryDisplayHdrStatus(display name): u64 HdrOutputFormat, u16. The sdk's
-    // DefaultDisplay::QueryHdrStatus takes format 1 as HDR output and fails with 0x272 on
-    // anything above 1. With the empty auto stub reply it read the request's leftover words as
-    // the format; Kirby Air Riders re-queries whenever its HDR status event fires and rebuilt its
-    // window images every few frames, which showed black. Report SDR output.
-    // nn::vi2::QueryDisplayHdrStatus(display name): u64 output format, u16 peak luminance in
-    // nits. The sdk takes format 1 as SDR and 2 as HDR and fails the query on any other value.
-    // Report SDR output with a typical SDR panel's peak.
+    // Wire reply: u64 output format (1 = SDR, 2 = HDR), u16 peak luminance in nits.
+    // MKW's SDK converts these to public formats 0/1 before DefaultDisplay tests for HDR.
+    // HDR is explicitly opt-in; luminance defaults are not host-display calibration.
     void QueryDisplayHdrStatus(HLERequestContext& ctx) {
-        TipcReplyWords(ctx, {1, 0, 400});
+        const bool hdr_enabled = Settings::IsHdrEnabled() &&
+                                 Settings::values.renderer_backend.GetValue() ==
+                                     Settings::RendererBackend::Vulkan;
+        TipcReplyWords(ctx, {hdr_enabled ? 2U : 1U, 0, Settings::values.hdr_peak_luminance.GetValue()});
     }
 
     // 212(u64 layer): u64 bits of the layer's buffer slots that are ready. The client polls it once
@@ -2359,7 +2363,7 @@ private:
     }
 
     // 263/265/267/269/271(u64 display name, u32 index): fire the slot when the display's refresh
-    // rate, HDR status, HDR paper white, buffer max resolution or mode capability changes, so the
+    // rate, HDR status, HDR reference white, buffer max resolution or mode capability changes, so the
     // game re-queries it. None of them change here: fire once so the game reads the current
     // state, then leave the slot quiet. Kirby Air Riders re-queried its HDR status on every
     // present while this slot fired with vsync.

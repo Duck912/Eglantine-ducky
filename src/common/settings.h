@@ -335,6 +335,11 @@ struct Values {
                                                                 linkage, true, "cpuopt_unsafe_ignore_global_monitor", Category::CpuUnsafe};
 
     // Renderer
+    SwitchableSetting<bool> hdr{linkage, false, "hdr", Category::Renderer};
+    SwitchableSetting<u16, true> hdr_reference_white{linkage, 200, 0, 1000, "hdr_reference_white",
+                                                   Category::Renderer, Specialization::Scalar};
+    SwitchableSetting<u16, true> hdr_peak_luminance{linkage, 300, 80, 10000, "hdr_peak_luminance",
+                                                                                                 Category::Renderer, Specialization::Scalar};
     SwitchableSetting<RendererBackend, true> renderer_backend{linkage,
 #if defined(__sun__) || defined(__managarm__)
         RendererBackend::OpenGL_GLSL,
@@ -967,6 +972,10 @@ struct Values {
 };
 
 extern Values values;
+
+// Process-only command-line override; not registered for configuration serialization.
+extern bool hdr_runtime_override;
+bool IsHdrEnabled();
 
 constexpr u32 MIN_FRAME_GEN_MULTIPLIER = 2;
 constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;

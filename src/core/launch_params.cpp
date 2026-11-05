@@ -50,6 +50,7 @@ LaunchParams ParseLaunchParams(Core::System& system, int argc, char *argv[], wch
         {"clear-nup-icon", no_argument, 0, 0x105},
         {"clear-nup-version", no_argument, 0, 0x106},
         {"clear-nup-publisher", no_argument, 0, 0x107},
+        {"hdr", no_argument, 0, 0x108},
         {0, 0, 0, 0},
         // clang-format on
     };
@@ -105,6 +106,9 @@ LaunchParams ParseLaunchParams(Core::System& system, int argc, char *argv[], wch
                 break;
             case 0x107:
                 p.edit_nup_publisher = std::string{};
+                break;
+            case 0x108:
+                p.hdr = true;
                 break;
             case 'i': {
                 p.input_profile = std::string(optarg);
@@ -197,6 +201,7 @@ LaunchParams ParseLaunchParams(Core::System& system, int argc, char *argv[], wch
 }
 
 void ApplyLaunchParams(LaunchParams const& lp) noexcept {
+    Settings::hdr_runtime_override = lp.hdr;
     // apply the log_filter setting
     // the logger was initialized before and doesn't pick up the filter on its own
     Common::Log::Filter filter{};
@@ -235,6 +240,7 @@ void ApplyLaunchParams(LaunchParams const& lp) noexcept {
             "-f, --fullscreen      Start in fullscreen mode\n"
             "-g, --game            File path of the game to load\n"
             "-h, --help            Display this help and exit\n"
+            "    --hdr             Enable HDR output (requires Vulkan and host HDR; currently PQ only)\n"
             "-m, --multiplayer=nick:password@address:port"
             " Nickname, password, address and port for multiplayer\n"
             "-p, --program         Pass following string as arguments to executable\n"

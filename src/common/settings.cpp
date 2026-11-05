@@ -83,6 +83,12 @@ SWITCHABLE(ConfirmStop, true);
 
 Values values;
 
+bool hdr_runtime_override = false;
+
+bool IsHdrEnabled() {
+    return hdr_runtime_override || values.hdr.GetValue();
+}
+
 std::string GetTimeZoneString(TimeZone time_zone) {
     const auto time_zone_index = static_cast<std::size_t>(time_zone);
     ASSERT(time_zone_index < Common::TimeZone::GetTimeZoneStrings().size());

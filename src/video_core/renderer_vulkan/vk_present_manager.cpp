@@ -413,6 +413,10 @@ void PresentManager::CopyToSwapchain(Frame* frame) {
             return CopyToSwapchainImpl(frame);
         } catch (const vk::Exception& except) {
             const VkResult result = except.GetResult();
+            if (result == VK_ERROR_FORMAT_NOT_SUPPORTED) {
+                DiscardFrame(frame);
+                return;
+            }
             if (result != VK_ERROR_SURFACE_LOST_KHR && result != VK_INCOMPLETE &&
                 result != VK_ERROR_OUT_OF_DATE_KHR && result != VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) {
                 throw;

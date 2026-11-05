@@ -28,6 +28,18 @@ namespace Vulkan {
 namespace {
 
 VkSurfaceFormatKHR ChooseSwapSurfaceFormat(vk::Span<VkSurfaceFormatKHR> formats) {
+    if (Settings::IsHdrEnabled()) {
+        const auto selected = std::find_if(formats.begin(), formats.end(), [](const auto& format) {
+            return (format.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
+                    format.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32) &&
+                   format.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT;
+        });
+        if (selected != formats.end()) {
+            return *selected;
+        }
+        LOG_ERROR(Render_Vulkan, "HDR10 output is not supported by this surface");
+        throw vk::Exception(VK_ERROR_FORMAT_NOT_SUPPORTED);
+    }
     if (formats.size() == 1 && formats[0].format == VK_FORMAT_UNDEFINED) {
         VkSurfaceFormatKHR format;
         format.format = VK_FORMAT_B8G8R8A8_UNORM;
@@ -151,8 +163,11 @@ void Swapchain::Create(
 
     Destroy();
 
+    // Keep recreation pending if format selection or creation fails.
+    is_suboptimal = true;
     CreateSwapchain(capabilities);
     CreateSemaphores();
+    is_suboptimal = false;
 
     resource_ticks.clear();
     resource_ticks.resize(image_count);
@@ -327,7 +342,8 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
         .viewFormatCount = static_cast<u32>(view_formats.size()),
         .pViewFormats = view_formats.data(),
     };
-    if (device.IsKhrSwapchainMutableFormatEnabled()) {
+    if (device.IsKhrSwapchainMutableFormatEnabled() &&
+        surface_format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
         format_list.pNext = std::exchange(swapchain_ci.pNext, &format_list);
         swapchain_ci.flags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
     }
@@ -347,6 +363,9 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
 #else
     image_view_format = VK_FORMAT_B8G8R8A8_UNORM;
 #endif
+    if (surface_format.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+        image_view_format = surface_format.format;
+    }
 }
 
 void Swapchain::CreateSemaphores() {
